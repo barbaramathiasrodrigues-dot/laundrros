@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>🧺 Laundry Queue OS — Rastreador de Estado da Máquina</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <style>
+    body {
+      background: linear-gradient(135deg, #090d16 0%, #111827 100%);
+      color: #f8fafc;
+      min-height: 100vh;
+    }
+    .glass-card {
+      background: rgba(17, 24, 39, 0.8);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+    }
+    /* ANIMAÇÃO RESPIRANDO PARA O MODO ALERTA (>12h / >20h) */
+    @keyframes breathing-red {
+      0%, 100% {
+        box-shadow: 0 0 20px rgba(239, 68, 68, 0.3);
+        border-color: rgba(239, 68, 68, 0.6);
+      }
+      50% {
+        box-shadow: 0 0 40px rgba(239, 68, 68, 0.8);
+        border-color: rgba(239, 68, 68, 1);
+      }
+    }
+    .pulse-resgate {
+      animation: breathing-red 2.5s infinite ease-in-out;
+    }
+
+    @keyframes rotate-slow {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+    .washing-spin {
+      animation: rotate-slow 12s linear infinite;
+    }
+  </style>
+</head>
+<body class="p-4 md:p-8 font-sans">
+
+  <div x-data="laundryApp()" x-init="initFirebase(); startTimer();" class="max-w-md mx-auto space-y-5">
+
+    <!-- HEADER: LAUNDRY QUEUE OS -->
+    <header class="glass-card rounded-3xl p-6 shadow-xl text-center border border-sky-900/40">
+      <div class="flex justify-between items-center mb-2">
+        <span class="text-xs font-bold uppercase tracking-widest text-sky-400">Casa OS • Rastreador de Estado</span>
+        <span x-show="loading" class="text-xs text-sky-300 bg-sky-950/60 px-2.5 py-1 rounded-full animate-pulse border border-sky-800">Sync...</span>
+      </div>
+      <h1 class="text-2xl font-black text-white flex items-center justify-center gap-2">
+        🧺 Laundry Queue OS
+      </h1>
+      <p class="text-xs text-sky-200/70 mt-1 italic">O estado da máquina nunca mais será um mistério</p>
+    </header>
+
+    <!-- TAMBOR CENTRAL DA MÁQUINA (O ESTADO ATUAL DA CASA) -->
+    <section class="glass-card rounded-3xl p-6 shadow-2xl text-center relative overflow-hidden transition-all duration-500"
+             :class="{'pulse-resgate bg-rose-950/30': statusCalculado.nivel === 'resgate', 'border-emerald-500/50': statusCalculado.nivel === 'pronta', 'border-sky-500/50': statusCalculado.nivel === 'lavando', 'border-slate-800': statusCalculado.nivel === 'vazia'}">
+      
+      <!-- INDICADOR STATUS PILULA -->
+      <div class="flex justify-center mb-4">
+        <span class="text-xs font-black px-3.5 py-1 rounded-full border uppercase tracking-wider flex items-center gap-1.5"
+              :class="statusCalculado.badgeClass">
+          <span class="text-sm" x-text="statusCalculado.icon"></span>
+          <span x-text="statusCalculado.rotulo"></span>
+        </span>
+      </div>
+
+      <!-- ILUSTRAÇÃO DO TAMBOR DA MÁQUINA -->
+      <div class="relative w-40 h-40 mx-auto mb-4 rounded-full border-4 flex items-center justify-center transition-all duration-500"
+           :class="statusCalculado.tamborBordaClass">
+        
+        <!-- ELEMENTO ROTATIVO SE LAVANDO -->
+        <div x-show="statusCalculado.nivel === 'lavando'" class="absolute inset-0 rounded-full border-2 border-dashed border-sky-400/60 washing-spin"></div>
+
+        <!-- CONTEÚDO DENTRO DA MÁQUINA -->
+        <div class="text-center space-y-1">
+          <template x-if="cargaAtual">
+            <div>
+              <span class="text-5xl block transform transition hover:scale-110" x-text="cargaAtual.categoriaIcon"></span>
+              <span class="text-sm font-black text-white block mt-1" x-text="cargaAtual.categoriaNome"></span>
+            </div>
+          </template>
+          <template x-if="!cargaAtual">
+            <div class="space-y-1">
+              <span class="text-4xl block opacity-40">🧺</span>
+              <span class="text-xs text-slate-400 font-bold block">Máquina Vazia</span>
+            </div>
+          </template>
+        </div>
+      </div>
+
+      <!-- HORÁRIOS & CRONÔMETRO DE ESTADO -->
+      <template x-if="cargaAtual">
+        <div class="space-y-3">
+          <div class="bg-slate-900/80 p-3.5 rounded-2xl border border-slate-800/80 grid grid-cols-2 gap-2 text-xs">
+            <div>
+              <span class="text-[10px] text-slate-400 uppercase font-bold block">Colocada às</span>
+              <span class="text-sm font-bold text-slate-200" x-text="formatarHora(cargaAtual.startTime)"></span>
+            </div>
+            <div>
+              <span class="text-[10px] text-slate-400 uppercase font-bold block">Pode Retirar às</span>
+              <span class="text-sm font-bold text-sky-300" x-text="formatarHora(cargaAtual.endTime)"></span>
+            </div>
+          </div>
+
+          <!-- TEMPO PASSADO / ALERTA DE RESGATE -->
+          <div class="text-xs font-bold" :class="statusCalculado.textoTempoClass" x-text="statusCalculado.mensagemTempo"></div>
+
+          <!-- BOTÃO PRINCIPAL DE RETIRADA -->
+          <button @click="abrirModalSaida()" class="w-full py-4 bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-600 text-slate-950 font-black text-sm rounded-2xl shadow-lg transition active:scale-95 flex items-center justify-center gap-2">
+            ✔ RETIRAR DA MÁQUINA
+          </button>
+        </div>
+      </template>
+
+      <!-- BOTÃO PARA QUANDO ESTÁ VAZIA -->
+      <template x-if="!cargaAtual">
+        <button @click="abrirModalNovaLavagem()" class="w-full py-4 bg-gradient-to-r from-sky-500 to-indigo-500 hover:from-sky-600 text-white font-black text-sm rounded-2xl shadow-lg transition active:scale-95 flex items-center justify-center gap-2">
+          🚀 INICIAR NOVA LAVAGEM
+        </button>
+      </template>
+
+    </section>
+
+    <!-- SEÇÃO: PRÓXIMA LAVAGEM (FILA DE ESPERA) -->
+    <section class="glass-card rounded-3xl p-5 shadow-xl border border-slate-800 space-y-3">
+      <div class="flex justify-between items-center">
+        <h2 class="text-xs font-bold uppercase tracking-wider text-sky-400 flex items-center gap-1.5">
+          <span>▶️ Próximas Lavagens na Fila</span>
+          <span class="text-[10px] bg-sky-950 text-sky-300 px-2 py-0.5 rounded-full border border-sky-800" x-text="fila.length"></span>
+        </h2>
+        <button @click="abrirModalNovaLavagem(true)" class="text-xs text-sky-300 font-bold hover:underline">+ Adicionar</button>
+      </div>
+
+      <!-- LISTA DE FILA -->
+      <div class="space-y-2">
+        <template x-for="(item, idx) in fila" :key="item.id">
+          <div class="flex justify-between items-center p-3 bg-slate-900/60 rounded-2xl border border-slate-800 text-xs">
+            <div class="flex items-center gap-2.5">
+              <span class="font-bold text-slate-500 text-xs" x-text="'#' + (idx + 1)"></span>
+              <span class="text-xl" x-text="item.categoriaIcon"></span>
+              <span class="font-bold text-white" x-text="item.categoriaNome"></span>
+            </div>
+            <div class="flex items-center gap-2">
+              <button @click="promoverParaLavando(idx)" x-show="!cargaAtual" class="px-2.5 py-1 bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30 rounded-lg font-bold text-[11px] border border-emerald-800/50">
+                Puxar p/ Máquina
+              </button>
+              <button @click="removerDaFila(idx)" class="text-rose-400 hover:text-rose-300 px-1.5 font-bold">✕</button>
+            </div>
+          </div>
+        </template>
+
+        <template x-if="fila.length === 0">
+          <div class="p-4 bg-slate-900/30 rounded-2xl border border-dashed border-slate-800 text-center text-xs text-slate-500">
+            Nenhuma lavagem na fila. A lavanderia está zerada! 🎉
+          </div>
+        </template>
+      </div>
+    </section>
+
+    <!-- HISTÓRICO RÁPIDO DA SEMANA -->
+    <section class="glass-card rounded-3xl p-5 shadow-xl border border-slate-800 space-y-2 text-xs">
+      <span class="text-[10px] font-bold uppercase tracking-wider text-slate-400">Resumo de Cargas na Semana</span>
+      <div class="grid grid-cols-4 gap-2 pt-1 text-center font-bold">
+        <div class="p-2 bg-slate-900/60 rounded-xl border border-slate-800">
+          <span class="block text-base">👕</span>
+          <span class="text-sky-300 text-sm" x-text="historico.roupa || 0"></span>
+        </div>
+        <div class="p-2 bg-slate-900/60 rounded-xl border border-slate-800">
+          <span class="block text-base">🛏️</span>
+          <span class="text-sky-300 text-sm" x-text="historico.cama || 0"></span>
+        </div>
+        <div class="p-2 bg-slate-900/60 rounded-xl border border-slate-800">
+          <span class="block text-base">🧹</span>
+          <span class="text-sky-300 text-sm" x-text="historico.panos || 0"></span>
+        </div>
+        <div class="p-2 bg-slate-900/60 rounded-xl border border-slate-800">
+          <span class="block text-base">🐶</span>
+          <span class="text-sky-300 text-sm" x-text="historico.pets || 0"></span>
+        </div>
+      </div>
+    </section>
+
+    <!-- MODAL 1: SELECIONAR CATEGORIA (INICIAR OU ADICIONAR FILA) -->
+    <template x-if="modalNovaAberta">
+      <div class="fixed inset-0 bg-slate-950/80 backdrop-blur-md flex items-end sm:items-center justify-center p-4 z-50">
+        <div class="glass-card w-full max-w-md rounded-3xl p-6 space-y-4 border border-sky-500/50 animate-fade-in">
+          <div class="flex justify-between items-center">
+            <h3 class="text-base font-bold text-white" x-text="adicionandoNaFila ? '➕ Adicionar à Fila' : '🧺 O que vai pra máquina agora?'"></h3>
+            <button @click="modalNovaAberta = false" class="text-slate-400 text-sm font-bold">✕</button>
+          </div>
+
+          <!-- BOTÕES GRANDES DE CATEGORIA -->
+          <div class="grid grid-cols-2 gap-2.5 text-xs">
+            <template x-for="cat in categorias" :key="cat.id">
+              <button @click="confirmarNovaLavagem(cat)" class="p-3.5 bg-slate-900/90 hover:bg-slate-800 border border-slate-700/80 rounded-2xl flex items-center gap-3 transition text-left">
+                <span class="text-3xl" x-text="cat.icon"></span>
+                <div>
+                  <div class="font-bold text-white" x-text="cat.nome"></div>
+                  <div class="text-[10px] text-slate-400" x-text="cat.tempoPadrao + ' min'"></div>
+                </div>
+              </button>
+            </template>
+          </div>
+        </div>
+      </div>
+    </template>
+
+    <!-- MODAL 2: DESTINO DA ROUPA AO RETIRAR (INTEGRAÇÃO COM OUTROS APPS) -->
+    <template x-if="modalSaidaAberta">
+      <div class="fixed inset-0 bg-slate-950/80 backdrop-blur-md flex items-end sm:items-center justify-center p-4 z-50">
+        <div class="glass-card w-full max-w-md rounded-3xl p-6 space-y-4 border border-emerald-500/50 animate-fade-in">
+          <div class="text-center space-y-1">
+            <span class="text-3xl block">👕✨</span>
+            <h3 class="text-base font-bold text-white">Para onde vai essa roupa agora?</h3>
+            <p class="text-xs text-slate-300">Conecte com o próximo passo da sua Casa Reguladora.</p>
+          </div>
+
+          <div class="space-y-2 text-xs pt-1">
+            <button @click="concluirRetirada('🧺 Dobrar / Mudar de Cesto')" class="w-full p-3.5 bg-slate-900/90 hover:bg-slate-800 border border-slate-700 rounded-2xl text-left font-bold text-slate-200 flex items-center justify-between">
+              <span>🧺 Deixar no Cesto (Dobrar depois)</span>
+              <span class="text-slate-500">➔</span>
+            </button>
+            <button @click="concluirRetirada('👕 Closet OS')" class="w-full p-3.5 bg-indigo-950/60 hover:bg-indigo-900/80 border border-indigo-800 rounded-2xl text-left font-bold text-indigo-200 flex items-center justify-between">
+              <span>👕 Closet OS (Guardar ou Varal)</span>
+              <span class="text-indigo-400">➔</span>
+            </button>
+            <button @click="concluirRetirada('🩲 Underwear OS')" class="w-full p-3.5 bg-purple-950/60 hover:bg-purple-900/80 border border-purple-800 rounded-2xl text-left font-bold text-purple-200 flex items-center justify-between">
+              <span>🩲 Underwear OS (Separar Calcinhas)</span>
+              <span class="text-purple-400">➔</span>
+            </button>
+            <button @click="concluirRetirada('🚪 Tia Lúcia')" class="w-full p-3.5 bg-amber-950/60 hover:bg-amber-900/80 border border-amber-800 rounded-2xl text-left font-bold text-amber-200 flex items-center justify-between">
+              <span>🚪 Levar para Tia Lúcia</span>
+              <span class="text-amber-400">➔</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </template>
+
+  </div>
+
+  <!-- FIREBASE MODULE (PROJETO BENJAMIN-EXPRESS-OS) -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
+    import { getFirestore, doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
+
+    const firebaseConfig = {
+      apiKey: "AIzaSyBoCzavo5Poj1kjKZbJ9rUwkLQyyjpMgmI",
+      authDomain: "benjamin-express-os.firebaseapp.com",
+      projectId: "benjamin-express-os",
+      storageBucket: "benjamin-express-os.firebasestorage.app",
+      messagingSenderId: "318003877871",
+      appId: "1:318003877871:web:54f4390f54c7710c5cc81a",
+      measurementId: "G-41JWT5ZN72"
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const db = getFirestore(app);
+    window.db = db;
+    window.doc = doc;
+    window.setDoc = setDoc;
+    window.onSnapshot = onSnapshot;
+  </script>
+
+  <!-- LÓGICA DO APP (AlpineJS) -->
+  <script>
+    function laundryApp() {
+      return {
+        loading: true,
+        now: new Date(),
+        cargaAtual: null,
+        fila: [],
+        historico: { roupa: 0, cama: 0, panos: 0, pets: 0 },
+        modalNovaAberta: false,
+        modalSaidaAberta: false,
+        adicionandoNaFila: false,
+
+        categorias: [
+          { id: 'roupa', nome: 'Roupa de Uso', icon: '👕', tempoPadrao: 45 },
+          { id: 'cama', nome: 'Roupa de Cama', icon: '🛏️', tempoPadrao: 60 },
+          { id: 'panos', nome: 'Panos de Chão', icon: '🧹', tempoPadrao: 40 },
+          { id: 'pets', nome: 'Mantas dos Cães', icon: '🐶', tempoPadrao: 50 },
+          { id: 'delicadas', nome: 'Delicadas', icon: '🧸', tempoPadrao: 30 },
+          { id: 'outro', nome: 'Outro Categoria', icon: '🧺', tempoPadrao: 45 }
+        ],
+
+        startTimer() {
+          setInterval(() => {
+            this.now = new Date();
+          }, 30000); // Atualiza a cada 30s
+        },
+
+        get statusCalculado() {
+          if (!this.cargaAtual) {
+            return {
+              nivel: 'vazia',
+              icon: '⚪',
+              rotulo: 'Máquina Livre',
+              badgeClass: 'bg-slate-900/80 text-slate-400 border-slate-700',
+              tamborBordaClass: 'border-slate-800 bg-slate-900/40',
+              mensagemTempo: 'Nenhuma roupa sendo lavada no momento.',
+              textoTempoClass: 'text-slate-400'
+            };
+          }
+
+          const end = new Date(this.cargaAtual.endTime);
+          const diffMinutes = Math.floor((this.now - end) / (1000 * 60));
+          const diffHours = Math.floor(diffMinutes / 60);
+
+          if (diffMinutes < 0) {
+            // Ainda lavando
+            const restaMin = Math.abs(diffMinutes);
+            return {
+              nivel: 'lavando',
+              icon: '🔵',
+              rotulo: 'Lavando em Andamento',
+              badgeClass: 'bg-sky-950/80 text-sky-300 border-sky-800',
+              tamborBordaClass: 'border-sky-500 bg-sky-950/20',
+              mensagemTempo: `Pronta em aprox. ${restaMin} minuto(s).`,
+              textoTempoClass: 'text-sky-300 font-bold'
+            };
+          } else if (diffHours < 2) {
+            // Pronta recentemente
+            return {
+              nivel: 'pronta',
+              icon: '🟢',
+              rotulo: 'Pronta para Retirar',
+              badgeClass: 'bg-emerald-950/80 text-emerald-300 border-emerald-800',
+              tamborBordaClass: 'border-emerald-500 bg-emerald-950/20',
+              mensagemTempo: 'Lavagem concluída! Pode retirar sem pressa.',
+              textoTempoClass: 'text-emerald-400 font-bold'
+            };
+          } else if (diffHours < 12) {
+            // Aguardando
+            return {
+              nivel: 'aguardando',
+              icon: '🟡',
+              rotulo: 'Aguardando Retirada',
+              badgeClass: 'bg-amber-950/80 text-amber-300 border-amber-800',
+              tamborBordaClass: 'border-amber-500 bg-amber-950/20',
+              mensagemTempo: `Esperando na máquina há ${diffHours} hora(s).`,
+              textoTempoClass: 'text-amber-300 font-bold'
+            };
+          } else if (diffHours < 24) {
+            // Alerta resgate (>12h)
+            return {
+              nivel: 'resgate',
+              icon: '🔴',
+              rotulo: 'Resgate Necessário',
+              badgeClass: 'bg-rose-950/90 text-rose-300 border-rose-800',
+              tamborBordaClass: 'border-rose-500 bg-rose-950/40',
+              mensagemTempo: `⚠️ ATENÇÃO: Roupa parada há ${diffHours} horas!`,
+              textoTempoClass: 'text-rose-400 font-black animate-pulse'
+            };
+          } else {
+            // > 24h Hora Limite
+            return {
+              nivel: 'resgate',
+              icon: '🔴🔴🔴',
+              rotulo: 'Limite 24h Atingido',
+              badgeClass: 'bg-rose-900 text-white border-rose-600',
+              tamborBordaClass: 'border-rose-600 bg-rose-950/60',
+              mensagemTempo: '😬 Roupa parada a mais de 1 dia! Vale lavar novamente.',
+              textoTempoClass: 'text-rose-300 font-black'
+            };
+          }
+        },
+
+        async initFirebase() {
+          const checkDb = setInterval(() => {
+            if (window.db) {
+              clearInterval(checkDb);
+              const docRef = window.doc(window.db, "modo_casa", "laundry_os");
+              window.onSnapshot(docRef, (docSnap) => {
+                if (docSnap.exists()) {
+                  const data = docSnap.data();
+                  this.cargaAtual = data.cargaAtual ?? null;
+                  this.fila = data.fila ?? [];
+                  this.historico = data.historico ?? { roupa: 0, cama: 0, panos: 0, pets: 0 };
+                }
+                this.loading = false;
+              });
+            }
+          }, 100);
+        },
+
+        async saveState() {
+          if (!window.db) return;
+          const payload = {
+            cargaAtual: this.cargaAtual,
+            fila: this.fila,
+            historico: this.historico,
+            updatedAt: new Date().toISOString()
+          };
+          const docRef = window.doc(window.db, "modo_casa", "laundry_os");
+          await window.setDoc(docRef, payload, { merge: true });
+        },
+
+        formatarHora(isoString) {
+          if (!isoString) return '--:--';
+          const date = new Date(isoString);
+          return date.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+        },
+
+        abrirModalNovaLavagem(paraFila = false) {
+          this.adicionandoNaFila = paraFila;
+          this.modalNovaAberta = true;
+        },
+
+        confirmarNovaLavagem(cat) {
+          const startTime = new Date();
+          const endTime = new Date(startTime.getTime() + cat.tempoPadrao * 60000);
+
+          const novaCarga = {
+            id: Date.now(),
+            categoriaId: cat.id,
+            categoriaNome: cat.nome,
+            categoriaIcon: cat.icon,
+            startTime: startTime.toISOString(),
+            endTime: endTime.toISOString()
+          };
+
+          if (this.adicionandoNaFila) {
+            this.fila.push(novaCarga);
+          } else {
+            this.cargaAtual = novaCarga;
+          }
+
+          this.modalNovaAberta = false;
+          this.saveState();
+        },
+
+        promoverParaLavando(index) {
+          const item = this.fila.splice(index, 1)[0];
+          const startTime = new Date();
+          const catTempo = this.categorias.find(c => c.id === item.categoriaId)?.tempoPadrao || 45;
+          const endTime = new Date(startTime.getTime() + catTempo * 60000);
+
+          item.startTime = startTime.toISOString();
+          item.endTime = endTime.toISOString();
+
+          this.cargaAtual = item;
+          this.saveState();
+        },
+
+        removerDaFila(index) {
+          this.fila.splice(index, 1);
+          this.saveState();
+        },
+
+        abrirModalSaida() {
+          this.modalSaidaAberta = true;
+        },
+
+        concluirRetirada(destino) {
+          if (this.cargaAtual) {
+            const catId = this.cargaAtual.categoriaId;
+            if (this.historico[catId] !== undefined) {
+              this.historico[catId]++;
+            }
+          }
+
+          this.cargaAtual = null;
+
+          // Se tiver item na fila, promove o primeiro automaticamente
+          if (this.fila.length > 0) {
+            this.promoverParaLavando(0);
+          }
+
+          this.modalSaidaAberta = false;
+          this.saveState();
+        }
+      }
+    }
+  </script>
+</body>
+</html>
