@@ -20,7 +20,6 @@
       -webkit-backdrop-filter: blur(16px);
       border: 1px solid rgba(255, 255, 255, 0.12);
     }
-    /* ANIMAÇÃO RESPIRANDO PARA O MODO ALERTA (>12h / >20h) */
     @keyframes breathing-red {
       0%, 100% {
         box-shadow: 0 0 20px rgba(239, 68, 68, 0.3);
@@ -46,14 +45,14 @@
 </head>
 <body class="p-4 md:p-8 font-sans">
 
-  <div x-data="laundryApp()" x-init="initFirebase(); startTimer();" class="max-w-md mx-auto space-y-5">
+  <div x-data="laundryApp()" x-init="initApp(); startTimer();" class="max-w-md mx-auto space-y-5">
 
     <!-- HEADER: LAUNDRY QUEUE OS -->
     <header class="glass-card rounded-3xl p-6 shadow-xl text-center border border-sky-900/40">
       <div class="flex justify-between items-center mb-2">
         <span class="text-xs font-bold uppercase tracking-widest text-sky-400">Casa OS • Rastreador de Estado</span>
-        <span x-show="loading" class="text-xs text-sky-300 bg-sky-950/60 px-2.5 py-1 rounded-full animate-pulse border border-sky-800">Syncing...</span>
-        <span x-show="!loading" class="text-[10px] text-emerald-400 bg-emerald-950/60 px-2 py-0.5 rounded-full border border-emerald-800">🟢 Firebase On</span>
+        <span x-show="loading" class="text-xs text-sky-300 bg-sky-950/60 px-2.5 py-1 rounded-full animate-pulse border border-sky-800">Conectando...</span>
+        <span x-show="!loading" class="text-[10px] text-emerald-400 bg-emerald-950/60 px-2 py-0.5 rounded-full border border-emerald-800">🟢 Notion Sync On</span>
       </div>
       <h1 class="text-2xl font-black text-white flex items-center justify-center gap-2">
         🧺 Laundry Queue OS
@@ -258,7 +257,7 @@
   <!-- FIREBASE MODULE (PROJETO BENJAMIN-EXPRESS-OS) -->
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
-    import { getFirestore, doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
+    import { getFirestore, doc, setDoc, getDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
 
     const firebaseConfig = {
       apiKey: "AIzaSyBoCzavo5Poj1kjKZbJ9rUwkLQyyjpMgmI",
@@ -273,10 +272,10 @@
     const app = initializeApp(firebaseConfig);
     const db = getFirestore(app);
 
-    // Torna o banco global para o Alpine.js acessar facilmente
     window.db = db;
     window.doc = doc;
     window.setDoc = setDoc;
+    window.getDoc = getDoc;
     window.onSnapshot = onSnapshot;
   </script>
 
@@ -305,7 +304,7 @@
         startTimer() {
           setInterval(() => {
             this.now = new Date();
-          }, 15000); // Atualiza o relógio a cada 15 segundos
+          }, 10000);
         },
 
         get statusCalculado() {
@@ -326,7 +325,6 @@
           const diffHours = Math.floor(diffMinutes / 60);
 
           if (diffMinutes < 0) {
-            // Ainda lavando
             const restaMin = Math.abs(diffMinutes);
             return {
               nivel: 'lavando',
@@ -338,7 +336,6 @@
               textoTempoClass: 'text-sky-300 font-bold'
             };
           } else if (diffHours < 2) {
-            // Pronta recentemente
             return {
               nivel: 'pronta',
               icon: '🟢',
@@ -349,7 +346,6 @@
               textoTempoClass: 'text-emerald-400 font-bold'
             };
           } else if (diffHours < 12) {
-            // Aguardando
             return {
               nivel: 'aguardando',
               icon: '🟡',
@@ -360,7 +356,6 @@
               textoTempoClass: 'text-amber-300 font-bold'
             };
           } else if (diffHours < 24) {
-            // Alerta resgate (>12h)
             return {
               nivel: 'resgate',
               icon: '🔴',
@@ -371,7 +366,6 @@
               textoTempoClass: 'text-rose-400 font-black animate-pulse'
             };
           } else {
-            // > 24h Hora Limite
             return {
               nivel: 'resgate',
               icon: '🔴🔴🔴',
@@ -384,34 +378,78 @@
           }
         },
 
-        async initFirebase() {
-          const checkDb = setInterval(() => {
+        // INICIALIZAÇÃO HÍBRIDA (LOCALSTORAGE + FIREBASE FORÇADO)
+        async initApp() {
+          // 1. Carrega do Cache Local Instantaneamente (Evita Tela Branca/Vazia)
+          const cache = localStorage.getItem('laundry_os_backup');
+          if (cache) {
+            try {
+              const parsed = JSON.parse(cache);
+              this.cargaAtual = parsed.cargaAtual ?? null;
+              this.fila = parsed.fila ?? [];
+              this.historico = parsed.historico ?? { roupa: 0, cama: 0, panos: 0, pets: 0 };
+            } catch(e) {}
+          }
+
+          // 2. Aguarda e Conecta com o Firebase
+          const checkDb = setInterval(async () => {
             if (window.db) {
               clearInterval(checkDb);
               const docRef = window.doc(window.db, "modo_casa", "laundry_os");
+              
+              // Leitura Direta Forçada para Vencer Bloqueio de iframe do Notion
+              try {
+                const snap = await window.getDoc(docRef);
+                if (snap.exists()) {
+                  this.aplicarDados(snap.data());
+                }
+              } catch(e) {}
+
+              // Inicia Escutador em Tempo Real
               window.onSnapshot(docRef, (docSnap) => {
                 if (docSnap.exists()) {
-                  const data = docSnap.data();
-                  this.cargaAtual = data.cargaAtual ?? null;
-                  this.fila = data.fila ?? [];
-                  this.historico = data.historico ?? { roupa: 0, cama: 0, panos: 0, pets: 0 };
+                  this.aplicarDados(docSnap.data());
                 }
                 this.loading = false;
+              }, (err) => {
+                this.loading = false; // Se der erro no listener do iframe, mantêm os dados locais
               });
             }
           }, 100);
         },
 
-        async saveState() {
-          if (!window.db) return;
-          const payload = {
+        aplicarDados(data) {
+          this.cargaAtual = data.cargaAtual ?? null;
+          this.fila = data.fila ?? [];
+          this.historico = data.historico ?? { roupa: 0, cama: 0, panos: 0, pets: 0 };
+          
+          // Salva no backup local
+          localStorage.setItem('laundry_os_backup', JSON.stringify({
             cargaAtual: this.cargaAtual,
             fila: this.fila,
-            historico: this.historico,
-            updatedAt: new Date().toISOString()
-          };
-          const docRef = window.doc(window.db, "modo_casa", "laundry_os");
-          await window.setDoc(docRef, payload, { merge: true });
+            historico: this.historico
+          }));
+        },
+
+        async saveState() {
+          // Atualiza Backup Local Primeiro
+          localStorage.setItem('laundry_os_backup', JSON.stringify({
+            cargaAtual: this.cargaAtual,
+            fila: this.fila,
+            historico: this.historico
+          }));
+
+          // Tenta Gravar no Firebase
+          if (window.db) {
+            const payload = {
+              cargaAtual: this.cargaAtual,
+              fila: this.fila,
+              historico: this.historico,
+              updatedAt: new Date().toISOString()
+            };
+            const docRef = window.doc(window.db, "modo_casa", "laundry_os");
+            await window.setDoc(docRef, payload, { merge: true });
+          }
         },
 
         formatarHora(isoString) {
@@ -480,7 +518,6 @@
 
           this.cargaAtual = null;
 
-          // Se houver item na fila, promove o primeiro automaticamente
           if (this.fila.length > 0) {
             this.promoverParaLavando(0);
           }
